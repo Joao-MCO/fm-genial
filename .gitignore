@@ -7,3 +7,7 @@ venv/
 outputs/*.csv
 *.egg-info/
 .DS_Store
+*.bat
+*.sh
+test.*
+/test
