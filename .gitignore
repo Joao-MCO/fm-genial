@@ -11,3 +11,5 @@ outputs/*.csv
 *.sh
 test.*
 /test
+/outputs
+/databases
