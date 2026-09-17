@@ -8,6 +8,8 @@ FREE_AGENT = "Free Agent"
 DIVISION_AVERAGE = "Division Average"
 DIVISION_POSITION_AVERAGE = "Division Position Average"
 DIVISION_STRENGTH = "Division Strength"
+DIVISION_POSITION_TOP5_AVERAGE = "Division Position Top5 Average"
+DIVISION_POSITION_BOTTOM5_AVERAGE = "Division Position Bottom5 Average"
 
 DIVISION_SAMPLE_SIZE = "Division Sample Size"
 DIVISION_POSITION_SAMPLE_SIZE = "Division Position Sample Size"
@@ -16,6 +18,8 @@ DIVISION_FEATURES = [
     DIVISION_AVERAGE,
     DIVISION_POSITION_AVERAGE,
     DIVISION_STRENGTH,
+    DIVISION_POSITION_TOP5_AVERAGE,
+    DIVISION_POSITION_BOTTOM5_AVERAGE,
     DIVISION_SAMPLE_SIZE,
     DIVISION_POSITION_SAMPLE_SIZE,
 ]
@@ -73,6 +77,74 @@ def _smoothed(
     ) / (
         count + prior_strength
     )
+
+
+def _loo_extreme_mean(
+    values: pd.Series,
+    n: int,
+    largest: bool,
+) -> pd.Series:
+    """Média dos n valores mais extremos (maiores ou menores) de um grupo,
+    excluindo, para cada linha, o próprio valor dessa linha (leave-one-out).
+
+    Vetorizado: ordena o grupo uma vez e ajusta apenas as linhas que fazem
+    parte do top-(n+1), em vez de recalcular o top-n por linha.
+    """
+
+    values = pd.to_numeric(values, errors="coerce")
+    valid = values.dropna()
+    k = len(valid)
+
+    result = pd.Series(float("nan"), index=values.index)
+
+    if k == 0:
+        return result
+
+    order = valid.sort_values(ascending=not largest)
+    ordered_vals = order.to_numpy()
+    ordered_idx = order.index.to_numpy()
+
+    limit = min(n + 1, k)
+    top_vals = ordered_vals[:limit]
+    top_idx = ordered_idx[:limit]
+    total_top = float(top_vals.sum())
+
+    default_topn = float(ordered_vals[:n].sum()) / min(n, k)
+    result.loc[valid.index] = default_topn
+
+    for position, idx in enumerate(top_idx):
+        own_val = ordered_vals[position]
+        remaining_sum = total_top - own_val
+        remaining_count = limit - 1
+        result.loc[idx] = (
+            remaining_sum / remaining_count
+            if remaining_count > 0
+            else float("nan")
+        )
+
+    return result
+
+
+def _extreme_mean_no_exclusion(
+    values: pd.Series,
+    n: int,
+    largest: bool,
+) -> float:
+    """Média dos n valores mais extremos de um grupo, sem excluir ninguém.
+    Usado para o conjunto de teste/validação, que consulta o treino como
+    referência fixa e nunca precisa se auto-excluir.
+    """
+
+    valid = pd.to_numeric(values, errors="coerce").dropna()
+
+    if valid.empty:
+        return float("nan")
+
+    order = valid.sort_values(ascending=not largest)
+    top = order.to_numpy()[:n]
+
+    return float(top.mean())
+
 
 
 def _position_mask(
@@ -281,6 +353,78 @@ def add_division_features(
     )
 
     # -----------------------------------------
+    # Divisão + posição: média dos 5 melhores / 5 piores
+    # -----------------------------------------
+    # Usa position_ref (referência), mas o LOO é aplicado apenas
+    # às linhas de `train` que também pertencem à referência —
+    # mesmo critério de own_in_position_reference usado acima.
+
+    position_ref_target = pd.to_numeric(
+        position_ref[target],
+        errors="coerce",
+    )
+
+    top5_by_division: dict[str, float] = {}
+    bottom5_by_division: dict[str, float] = {}
+
+    top5_result = pd.Series(float("nan"), index=train.index)
+    bottom5_result = pd.Series(float("nan"), index=train.index)
+
+    # position_ref preserva o índice original de `reference` (que, na
+    # chamada real, é a mesma tabela que `train`). Isso permite localizar
+    # a própria linha de cada jogador dentro do grupo sem depender de
+    # Unique ID, que pode se repetir entre temporadas.
+    for division_value, group in position_ref_target.groupby(
+        position_ref[division_column]
+    ):
+        top5_by_division[division_value] = _extreme_mean_no_exclusion(
+            group, 5, largest=True
+        )
+        bottom5_by_division[division_value] = _extreme_mean_no_exclusion(
+            group, 5, largest=False
+        )
+
+        train_in_group = (
+            own_in_position_reference
+            & (train[division_column] == division_value)
+        )
+
+        if not train_in_group.any():
+            continue
+
+        loo_top5 = _loo_extreme_mean(group, 5, largest=True)
+        loo_bottom5 = _loo_extreme_mean(group, 5, largest=False)
+
+        # Índices de `train` que também aparecem em `group` (mesma
+        # posição de linha na tabela original) recebem o valor LOO;
+        # os demais (jogadores fora da referência, ex.: fold de
+        # validação) ficam de fora e caem no default calculado abaixo.
+        shared_idx = train.index[train_in_group].intersection(group.index)
+
+        top5_result.loc[shared_idx] = loo_top5.loc[shared_idx]
+        bottom5_result.loc[shared_idx] = loo_bottom5.loc[shared_idx]
+
+    default_top5 = train_div.map(top5_by_division)
+    default_bottom5 = train_div.map(bottom5_by_division)
+
+    top5_result = top5_result.fillna(default_top5)
+    bottom5_result = bottom5_result.fillna(default_bottom5)
+
+    train[DIVISION_POSITION_TOP5_AVERAGE] = _smoothed(
+        top5_result,
+        pos_count.clip(lower=0),
+        position_global,
+        prior_strength,
+    )
+
+    train[DIVISION_POSITION_BOTTOM5_AVERAGE] = _smoothed(
+        bottom5_result,
+        pos_count.clip(lower=0),
+        position_global,
+        prior_strength,
+    )
+
+    # -----------------------------------------
     # Força da divisão
     # -----------------------------------------
 
@@ -411,6 +555,23 @@ def add_division_features(
             DIVISION_POSITION_AVERAGE
         ] = _smoothed(
             pos_mean,
+            pos_count,
+            position_global,
+            prior_strength,
+        )
+
+        top5_mean = frame[division_column].map(top5_by_division)
+        bottom5_mean = frame[division_column].map(bottom5_by_division)
+
+        frame[DIVISION_POSITION_TOP5_AVERAGE] = _smoothed(
+            top5_mean,
+            pos_count,
+            position_global,
+            prior_strength,
+        )
+
+        frame[DIVISION_POSITION_BOTTOM5_AVERAGE] = _smoothed(
+            bottom5_mean,
             pos_count,
             position_global,
             prior_strength,
