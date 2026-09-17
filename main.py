@@ -7,6 +7,7 @@ import time
 
 import pandas as pd
 from sklearn.dummy import DummyRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -140,7 +141,11 @@ def run_rating_experiment(df: pd.DataFrame):
     logger.info("Treinando modelo de Rating com %d amostras...", len(X))
     start = time.perf_counter()
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=DEFAULT_TEST_SIZE, random_state=42)
-    model = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=DEFAULT_ALPHA))])
+    model = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        ("scaler", StandardScaler()),
+        ("ridge", Ridge(alpha=DEFAULT_ALPHA)),
+    ])
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
     baseline = DummyRegressor(strategy="mean").fit(X_train, y_train).predict(X_test)
