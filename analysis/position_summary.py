@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from helpers.positioning import (
-    get_canonical_positions,
+    CANONICAL_POSITIONS,
     position_matches,
 )
 
@@ -21,7 +21,7 @@ def build_position_summary(
 
     rows = []
 
-    for position in get_canonical_positions:
+    for position in CANONICAL_POSITIONS:
 
         mask = df[position_column].apply(
             lambda value: position_matches(
